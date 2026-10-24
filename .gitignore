@@ -9,6 +9,9 @@ __pycache__/
 # Distribution / packaging
 dist/
 build/
+node_modules/
+*.tsbuildinfo
+src/nw_util/web_dist/
 *.egg-info/
 *.egg
 

@@ -10,11 +10,21 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "nw-util contributors" }]
-dependencies = ["zeroconf>=0.131"]
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "zeroconf>=0.131",
+]
+
+[project.optional-dependencies]
+test = ["httpx>=0.27,<1"]
 
 [project.scripts]
 nw-util = "nw_util.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nw_util"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/nw_util/web_dist" = "nw_util/web_dist"
 

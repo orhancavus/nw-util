@@ -9,14 +9,19 @@ import time
 from datetime import datetime
 
 from . import __version__
-from .discovery import discover_mdns, merge_mdns
-from .enrich import enrich_devices
 from .models import Neighbor, NetworkContext
-from .network import detect_network, scan
-from .query import filter_devices, sort_devices
+from .network import detect_network
 from .render import render_csv, render_json, render_table
 from .security import inspect_ip, profile_as_dict, resolve_target
-from .storage import DeviceStore, device_key
+from .services.scanner import (
+    DeviceQuery,
+    ScanOptions,
+    collect_devices as collect_scan_devices,
+    diff_devices,
+    keyed_devices,
+    select_devices,
+)
+from .storage import DeviceStore
 
 
 def _add_scan_arguments(parser: argparse.ArgumentParser, *, output: bool = True) -> None:
@@ -82,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     security.add_argument("--json", action="store_true", help="output the complete profile as JSON")
     _add_scan_arguments(security, output=False)
+
+    web = commands.add_parser("web", help="start the local web operator console")
+    web.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
+    web.add_argument("--port", type=int, default=8765, help="HTTP port (default: 8765)")
+    web.add_argument("--reload", action="store_true", help="reload the server when source files change")
     return parser
 
 
@@ -94,9 +104,20 @@ def _color_enabled(args: argparse.Namespace) -> bool:
 
 
 def _validate_scan_args(args: argparse.Namespace) -> None:
-    values = (args.timeout, args.workers, args.max_hosts, args.mdns_timeout)
-    if any(value <= 0 for value in values):
-        raise ValueError("--timeout, --workers, --max-hosts, and --mdns-timeout must be positive")
+    _scan_options(args).validate()
+
+
+def _scan_options(args: argparse.Namespace) -> ScanOptions:
+    return ScanOptions(
+        network=args.network,
+        timeout=args.timeout,
+        workers=args.workers,
+        max_hosts=args.max_hosts,
+        deep=args.deep,
+        discover=args.discover,
+        mdns_timeout=args.mdns_timeout,
+        record_history=not args.no_history,
+    )
 
 
 def collect_devices(
@@ -105,8 +126,9 @@ def collect_devices(
     *,
     announce: bool = True,
 ) -> tuple[NetworkContext, list[Neighbor]]:
-    _validate_scan_args(args)
-    context = detect_network(args.network)
+    options = _scan_options(args)
+    options.validate()
+    context = detect_network(options.network)
     if announce:
         modes = []
         if args.discover or args.deep:
@@ -115,26 +137,21 @@ def collect_devices(
             modes.append("service")
         suffix = f" with {' + '.join(modes)} enrichment" if modes else ""
         print(f"Scanning {context.network}{suffix} …", file=sys.stderr)
-    devices = scan(context, timeout=args.timeout, workers=args.workers, max_hosts=args.max_hosts)
-    if args.discover or args.deep:
-        devices = merge_mdns(devices, discover_mdns(args.mdns_timeout), context)
-    if args.deep:
-        devices = enrich_devices(devices, timeout=args.timeout, workers=args.workers)
-    devices = store.apply_aliases(devices)
-    if not args.no_history:
-        store.record(devices)
-    return context, devices
+    result = collect_scan_devices(options, store, context=context)
+    return result.context, list(result.devices)
 
 
 def _selected_devices(args: argparse.Namespace, devices: list[Neighbor]) -> list[Neighbor]:
-    devices = filter_devices(
+    return select_devices(
         devices,
+        DeviceQuery(
         device_type=args.device_type,
         status=args.status,
         vendor=args.vendor,
         text=args.text_filter,
+            sort=args.sort,
+        ),
     )
-    return sort_devices(devices, args.sort)
 
 
 def _run_scan(args: argparse.Namespace, store: DeviceStore, color: bool) -> None:
@@ -175,27 +192,6 @@ def _event(kind: str, device: Neighbor) -> str:
     return f"{timestamp}  {icons[kind]} {kind:<7}  {name:<28} {device.ip}"
 
 
-def diff_devices(
-    previous: dict[str, Neighbor], current: dict[str, Neighbor]
-) -> list[tuple[str, Neighbor]]:
-    events: list[tuple[str, Neighbor]] = []
-    events.extend(("NEW", current[key]) for key in sorted(current.keys() - previous.keys()))
-    events.extend(("OFFLINE", previous[key]) for key in sorted(previous.keys() - current.keys()))
-    for key in sorted(current.keys() & previous.keys()):
-        before, after = previous[key], current[key]
-        if before.responsive != after.responsive:
-            events.append(("ONLINE" if after.responsive else "OFFLINE", after))
-        elif (before.ip, before.hostname, before.vendor, before.model, before.services) != (
-            after.ip,
-            after.hostname,
-            after.vendor,
-            after.model,
-            after.services,
-        ):
-            events.append(("CHANGED", after))
-    return events
-
-
 def _run_watch(args: argparse.Namespace, store: DeviceStore, color: bool) -> None:
     if args.interval <= 0 or args.count < 0:
         raise ValueError("--interval must be positive and --count cannot be negative")
@@ -203,7 +199,7 @@ def _run_watch(args: argparse.Namespace, store: DeviceStore, color: bool) -> Non
     iteration = 0
     while args.count == 0 or iteration < args.count:
         context, devices = collect_devices(args, store, announce=iteration == 0)
-        current = {device_key(device): device for device in devices}
+        current = keyed_devices(devices)
         if iteration == 0:
             print(render_table(devices, context, color=color))
             print(f"Watching every {args.interval:g} seconds. Press Ctrl-C to stop.")
@@ -221,6 +217,22 @@ def _history_target_ip(target: str, store: DeviceStore) -> str | None:
     if not records or not records[0].get("ips"):
         return None
     return records[0]["ips"][-1]
+
+
+def _run_web(args: argparse.Namespace) -> None:
+    if not 1 <= args.port <= 65535:
+        raise ValueError("--port must be between 1 and 65535")
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        print(
+            "Warning: the web UI is being exposed beyond this computer and reveals local network metadata.",
+            file=sys.stderr,
+        )
+    try:
+        import uvicorn
+    except ImportError as exc:
+        raise RuntimeError("Web dependencies are not installed; reinstall nw-util to enable the web UI") from exc
+    print(f"Starting nw-util web UI at http://{args.host}:{args.port}", file=sys.stderr)
+    uvicorn.run("nw_util.api.app:create_app", host=args.host, port=args.port, reload=args.reload, factory=True)
 
 
 def _run_inspect(args: argparse.Namespace, store: DeviceStore) -> None:
@@ -300,6 +312,8 @@ def main(argv: list[str] | None = None) -> None:
             _run_watch(args, store, color)
         elif args.command in {"security", "inspect"}:
             _run_inspect(args, store)
+        elif args.command == "web":
+            _run_web(args)
         else:
             _run_scan(args, store, color)
     except (RuntimeError, ValueError, OSError) as exc:

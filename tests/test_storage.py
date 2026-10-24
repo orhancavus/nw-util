@@ -29,8 +29,10 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = DeviceStore(Path(directory) / "state.json")
             store.set_alias("192.168.1.20", "TV")
+            store.record(store.apply_aliases([Neighbor(IPv4Address("192.168.1.20"))]))
             self.assertTrue(store.remove_alias("192.168.1.20"))
             self.assertFalse(store.remove_alias("192.168.1.20"))
+            self.assertIsNone(store.history("192.168.1.20")[0]["alias"])
 
     def test_ip_only_history_merges_when_mac_is_learned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
