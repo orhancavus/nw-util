@@ -19,6 +19,13 @@ class CliTests(unittest.TestCase):
         events = diff_devices({"device": before}, {"device": after})
         self.assertEqual(events, [("ONLINE", after)])
 
+    def test_security_and_inspect_alias_parse(self) -> None:
+        security = build_parser().parse_args(["security", "192.168.1.10", "--json"])
+        inspect = build_parser().parse_args(["inspect", "192.168.1.10"])
+        self.assertEqual(security.command, "security")
+        self.assertEqual(inspect.command, "inspect")
+        self.assertTrue(security.json)
+
     def test_csv_output(self) -> None:
         output = render_csv([Neighbor(IPv4Address("192.168.1.5"), hostname="pi.local")])
         self.assertIn("type,name,status,ip", output)

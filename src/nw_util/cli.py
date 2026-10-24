@@ -15,7 +15,7 @@ from .models import Neighbor, NetworkContext
 from .network import detect_network, scan
 from .query import filter_devices, sort_devices
 from .render import render_csv, render_json, render_table
-from .security import inspect_ip, resolve_target
+from .security import inspect_ip, profile_as_dict, resolve_target
 from .storage import DeviceStore, device_key
 
 
@@ -69,9 +69,19 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--interval", type=float, default=10.0, help="seconds between scans (default: 10)")
     watch.add_argument("--count", type=int, default=0, help="stop after this many scans; 0 watches forever")
 
-    inspect = commands.add_parser("inspect", help="inspect one device's exposed services")
-    inspect.add_argument("target", help="IP address, MAC address, hostname, or saved alias")
-    _add_scan_arguments(inspect, output=False)
+    security = commands.add_parser(
+        "security",
+        aliases=("inspect",),
+        help="build a security profile for one device (alias: inspect)",
+    )
+    security.add_argument("target", help="IP address, MAC address, hostname, or saved alias")
+    security.add_argument(
+        "--os-detect",
+        action="store_true",
+        help="request privileged Nmap TCP/IP OS fingerprinting when already running as root",
+    )
+    security.add_argument("--json", action="store_true", help="output the complete profile as JSON")
+    _add_scan_arguments(security, output=False)
     return parser
 
 
@@ -224,15 +234,43 @@ def _run_inspect(args: argparse.Namespace, store: DeviceStore) -> None:
         ip = ipaddress.IPv4Address(historical_ip)
     if ip is None:
         raise ValueError(f"Could not resolve device target: {args.target}")
-    result = inspect_ip(ip, timeout=args.timeout)
-    print(f"\nSecurity inspection: {ip}")
+    result = inspect_ip(ip, timeout=args.timeout, os_detect=args.os_detect)
+    if args.json:
+        print(json.dumps(profile_as_dict(result), indent=2))
+        return
+    print(f"\nSecurity profile: {ip}")
     print(f"Scanner: {result.scanner}")
+    if result.os_detection_note:
+        print(f"Note: {result.os_detection_note}")
+    if result.os_guesses:
+        print("\nProbable operating system:")
+        for guess in result.os_guesses:
+            confidence = f" · {guess.accuracy}% confidence" if guess.accuracy is not None else ""
+            device_type = f" · {guess.device_type}" if guess.device_type else ""
+            print(f"  • {guess.name}{confidence}{device_type} [{guess.source}]")
+            for cpe in guess.cpes:
+                print(f"      CPE: {cpe}")
+    else:
+        print("\nProbable operating system: insufficient evidence")
     if result.services:
-        print("\nExposed services:")
+        print("\nOpen services:")
         for service in result.services:
-            print(f"  • {service}")
+            confidence = f" · confidence {service.confidence}/10" if service.confidence is not None else ""
+            details = " ".join(filter(None, (service.product, service.version, service.extra_info)))
+            detail_text = f" · {details}" if details else ""
+            print(f"  • {service.port}/{service.protocol} {service.name}{detail_text}{confidence}")
+            for cpe in service.cpes:
+                print(f"      CPE: {cpe}")
     else:
         print("\nNo inspected TCP services responded.")
+    severity_counts = {
+        severity: sum(finding.severity == severity for finding in result.findings)
+        for severity in ("high", "medium", "info")
+    }
+    print(
+        "\nRisk summary: "
+        f"{severity_counts['high']} high · {severity_counts['medium']} medium · {severity_counts['info']} informational"
+    )
     if result.findings:
         print("\nObservations:")
         for finding in result.findings:
@@ -260,7 +298,7 @@ def main(argv: list[str] | None = None) -> None:
             _run_history(args, store)
         elif args.command == "watch":
             _run_watch(args, store, color)
-        elif args.command == "inspect":
+        elif args.command in {"security", "inspect"}:
             _run_inspect(args, store)
         else:
             _run_scan(args, store, color)
