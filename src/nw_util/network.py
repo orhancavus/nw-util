@@ -47,10 +47,8 @@ def _fallback_address() -> ipaddress.IPv4Address:
 
 def _linux_context() -> NetworkContext | None:
     routes = _run("ip", "-j", "route", "show", "default")
-    if not routes:
-        return None
     try:
-        route = json.loads(routes)[0]
+        route = next(item for item in json.loads(routes) if item.get("dev"))
         interface = route.get("dev")
         gateway = ipaddress.IPv4Address(route["gateway"]) if route.get("gateway") else None
         addresses = json.loads(_run("ip", "-j", "address", "show", "dev", interface))
@@ -58,8 +56,30 @@ def _linux_context() -> NetworkContext | None:
         address = ipaddress.IPv4Address(info["local"])
         network = ipaddress.IPv4Network(f"{address}/{info['prefixlen']}", strict=False)
         return NetworkContext(address, network, interface, gateway)
-    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (IndexError, KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError):
+        pass
+
+    # Older iproute2 releases may not support JSON output.
+    route_text = _run("ip", "route", "get", "1.1.1.1")
+    match = re.search(
+        r"(?:^|\s)via\s+(?P<gateway>\d+(?:\.\d+){3})\s+dev\s+(?P<interface>\S+).*?\bsrc\s+(?P<address>\d+(?:\.\d+){3})",
+        route_text,
+    )
+    if not match:
+        match = re.search(
+            r"(?:^|\s)dev\s+(?P<interface>\S+).*?\bsrc\s+(?P<address>\d+(?:\.\d+){3})",
+            route_text,
+        )
+    if not match:
         return None
+    interface = match.group("interface")
+    address = ipaddress.IPv4Address(match.group("address"))
+    gateway_value = match.groupdict().get("gateway")
+    gateway = ipaddress.IPv4Address(gateway_value) if gateway_value else None
+    address_text = _run("ip", "-o", "-4", "address", "show", "dev", interface)
+    prefix_match = re.search(rf"\binet\s+{re.escape(str(address))}/(\d+)\b", address_text)
+    prefix = int(prefix_match.group(1)) if prefix_match else 24
+    return NetworkContext(address, ipaddress.IPv4Network(f"{address}/{prefix}", strict=False), interface, gateway)
 
 
 def _darwin_context() -> NetworkContext | None:
@@ -178,25 +198,43 @@ def _read_oui_database() -> dict[str, str]:
     candidates = (
         Path("/opt/homebrew/share/nmap/nmap-mac-prefixes"),
         Path("/usr/local/share/nmap/nmap-mac-prefixes"),
+        Path("/usr/share/nmap/nmap-mac-prefixes"),
         Path("/usr/share/ieee-data/oui.txt"),
         Path("/usr/share/misc/oui.txt"),
         Path("/var/lib/ieee-data/oui.txt"),
     )
-    database: dict[str, str] = {}
     for path in candidates:
         try:
             lines = path.read_text(errors="ignore").splitlines()
         except OSError:
             continue
-        for line in lines:
-            match = re.match(r"^([0-9A-Fa-f]{6})\s+\(base 16\)\s+(.+?)\s*$", line)
-            if not match:
-                match = re.match(r"^([0-9A-Fa-f]{6})\s+(.+?)\s*$", line)
-            if match:
-                database[match.group(1).upper()] = match.group(2)
+        database = _parse_oui_lines(lines)
         if database:
-            break
+            return database
+    return {}
+
+
+def _parse_oui_lines(lines: list[str]) -> dict[str, str]:
+    database: dict[str, str] = {}
+    for line in lines:
+        match = re.match(r"^([0-9A-Fa-f]{6})\s+\(base 16\)\s+(.+?)\s*$", line)
+        if not match:
+            match = re.match(r"^([0-9A-Fa-f]{6})\s+(.+?)\s*$", line)
+        if match:
+            database[match.group(1).upper()] = match.group(2)
     return database
+
+
+def _interface_mac(interface: str | None) -> str | None:
+    if not interface:
+        return None
+    try:
+        raw = Path(f"/sys/class/net/{interface}/address").read_text().strip()
+    except OSError:
+        ifconfig = _run("ifconfig", interface)
+        match = re.search(r"(?:ether|HWaddr)\s+([0-9a-fA-F:]{17})", ifconfig)
+        raw = match.group(1) if match else ""
+    return _normalize_mac(raw) if re.fullmatch(MAC_PATTERN, raw) else None
 
 
 def _vendor_for(mac: str | None, database: dict[str, str]) -> str | None:
@@ -215,7 +253,7 @@ def scan(
     workers: int = 64,
     max_hosts: int = 1024,
 ) -> list[Neighbor]:
-    host_count = max(0, context.network.num_addresses - 2)
+    host_count = context.network.num_addresses if context.network.prefixlen >= 31 else context.network.num_addresses - 2
     if host_count > max_hosts:
         raise ValueError(
             f"{context.network} contains {host_count:,} hosts; use a narrower network or increase --max-hosts"
@@ -236,6 +274,8 @@ def scan(
     for ip in sorted(discovered):
         mac, cached_name = cached.get(ip, (None, None))
         is_self = ip == context.address
+        if is_self and not mac:
+            mac = _interface_mac(context.interface)
         devices.append(
             Neighbor(
                 ip=ip,

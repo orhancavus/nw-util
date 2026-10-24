@@ -23,15 +23,22 @@ def _resolve_name(ip: ipaddress.IPv4Address) -> str | None:
     if platform.system() == "Darwin":
         args = ("dscacheutil", "-q", "host", "-a", "ip_address", str(ip))
         pattern = r"^name:\s*(\S+)"
+        commands = ((args, pattern),)
     else:
-        args = ("getent", "hosts", str(ip))
-        pattern = rf"^{re.escape(str(ip))}\s+(\S+)"
-    try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=1.5, check=False)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    match = re.search(pattern, result.stdout, re.MULTILINE)
-    return match.group(1).removesuffix(".") if match else None
+        escaped = re.escape(str(ip))
+        commands = (
+            (("getent", "hosts", str(ip)), rf"^{escaped}\s+(\S+)"),
+            (("host", str(ip)), r"domain name pointer\s+(\S+)"),
+        )
+    for args, pattern in commands:
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, timeout=1.5, check=False)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        match = re.search(pattern, result.stdout, re.MULTILINE)
+        if match:
+            return match.group(1).removesuffix(".")
+    return None
 
 
 def parse_nmap_services(xml_output: str) -> dict[ipaddress.IPv4Address, tuple[str, ...]]:
