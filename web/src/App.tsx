@@ -11,6 +11,7 @@ import {
   History,
   Laptop,
   Menu,
+  Moon,
   Network,
   Play,
   Radar,
@@ -19,6 +20,7 @@ import {
   ServerCog,
   ShieldCheck,
   SlidersHorizontal,
+  Sun,
   Tag,
   Wifi,
   X,
@@ -38,6 +40,7 @@ import type {
 } from './types';
 
 type View = 'devices' | 'watch' | 'history';
+type Theme = 'dark' | 'light';
 
 const initialSettings: ScanSettings = {
   network: null,
@@ -64,6 +67,11 @@ const phaseLabels: Record<string, string> = {
 };
 
 function App() {
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = window.localStorage.getItem('nw-util-theme');
+    if (saved === 'dark' || saved === 'light') return saved;
+    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  });
   const [view, setView] = useState<View>('devices');
   const [context, setContext] = useState<NetworkContext | null>(null);
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
@@ -77,13 +85,27 @@ function App() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sort, setSort] = useState<'ip' | 'name' | 'latency'>('ip');
   const [selected, setSelected] = useState<Device | null>(null);
-  const [dockOpen, setDockOpen] = useState(false);
+  const [dockOpen, setDockOpen] = useState(() => window.matchMedia('(min-width: 1051px)').matches);
   const [history, setHistory] = useState<HistoryRecord[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [watchJob, setWatchJob] = useState<Job<ScanResult> | null>(null);
   const [watchEvents, setWatchEvents] = useState<WatchEvent[]>([]);
   const scanSource = useRef<EventSource | null>(null);
   const watchSource = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('light-theme', theme === 'light');
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem('nw-util-theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1051px)');
+    const syncDockToViewport = (event: MediaQueryListEvent) => setDockOpen(event.matches);
+    desktop.addEventListener('change', syncDockToViewport);
+    return () => desktop.removeEventListener('change', syncDockToViewport);
+  }, []);
 
   useEffect(() => {
     Promise.all([api.context(), api.capabilities()])
@@ -277,6 +299,9 @@ function App() {
         phase={phase}
         total={scanResult?.device_count ?? 0}
         online={onlineCount}
+        theme={theme}
+        dockOpen={dockOpen}
+        onToggleTheme={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
         onToggleDock={() => setDockOpen((open) => !open)}
       />
 
@@ -358,6 +383,9 @@ function Header(props: {
   phase: string;
   total: number;
   online: number;
+  theme: Theme;
+  dockOpen: boolean;
+  onToggleTheme: () => void;
   onToggleDock: () => void;
 }) {
   const state = props.watchActive ? 'WATCHING' : props.scanActive ? 'SCANNING' : 'STANDBY';
@@ -378,10 +406,50 @@ function Header(props: {
         {props.scanActive && <><i /><span>{phaseLabels[props.phase] ?? props.phase}</span></>}
       </div>
       <div className="hud-actions">
+        <a
+          href="https://github.com/orhancavus"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="GitHub Profile (@orhancavus)"
+          title="GitHub — @orhancavus"
+          className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-amber-400 hover:border-zinc-700 transition-colors flex items-center gap-1.5"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="currentColor"
+            className="w-4 h-4"
+            aria-hidden="true"
+          >
+            <path
+              fillRule="evenodd"
+              clipRule="evenodd"
+              d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+            />
+          </svg>
+        </a>
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={props.onToggleTheme}
+          aria-label={`Switch to ${props.theme === 'dark' ? 'light' : 'dark'} theme`}
+          aria-pressed={props.theme === 'light'}
+          title={`Switch to ${props.theme === 'dark' ? 'light' : 'dark'} theme`}
+        >
+          {props.theme === 'dark' ? <Sun size={17} aria-hidden="true" /> : <Moon size={17} aria-hidden="true" />}
+        </button>
         <span className={`capability ${props.capabilities?.nmap ? 'ready' : ''}`} title="Nmap deep-scan capability">
           <Zap size={13} /> NMAP {props.capabilities?.nmap ? 'READY' : 'OFF'}
         </span>
-        <button onClick={props.onToggleDock} aria-label="Toggle scan controls"><SlidersHorizontal size={19} /></button>
+        <button
+          type="button"
+          onClick={props.onToggleDock}
+          aria-label={`${props.dockOpen ? 'Hide' : 'Show'} scan parameters`}
+          aria-expanded={props.dockOpen}
+          aria-controls="scan-parameters-dock"
+          title={`${props.dockOpen ? 'Hide' : 'Show'} scan parameters`}
+        >
+          <SlidersHorizontal size={19} />
+        </button>
       </div>
     </header>
   );
@@ -489,7 +557,7 @@ function ControlDock(props: {
 }) {
   const patch = <K extends keyof ScanSettings>(key: K, value: ScanSettings[K]) => props.setSettings((current) => ({ ...current, [key]: value }));
   return (
-    <aside className={`control-dock ${props.open ? 'open' : ''}`} aria-label="Scan controls">
+    <aside id="scan-parameters-dock" className={`control-dock ${props.open ? 'open' : ''}`} aria-label="Scan controls" aria-hidden={!props.open} inert={!props.open}>
       <div className="dock-title"><div><span className="eyebrow">CONTROL DOCK</span><h2>Scan parameters</h2></div><button onClick={props.onClose} aria-label="Close controls"><X /></button></div>
       <div className="dock-scroll">
         <Control label="Network range" badge="CIDR"><input value={props.settings.network ?? ''} onChange={(event) => patch('network', event.target.value || null)} className="mono" /></Control>

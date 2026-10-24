@@ -6,6 +6,14 @@
     <meta name="theme-color" content="#09090b" />
     <meta name="description" content="Local network operator console for nw-util" />
     <title>nw-util · Network Console</title>
+    <script>
+      (() => {
+        const saved = localStorage.getItem('nw-util-theme');
+        const light = saved === 'light' || (!saved && matchMedia('(prefers-color-scheme: light)').matches);
+        document.documentElement.classList.toggle('light-theme', light);
+        document.documentElement.classList.toggle('dark', !light);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
