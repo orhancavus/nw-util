@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import csv
+import io
 import re
 import unicodedata
 from collections.abc import Sequence
@@ -56,7 +58,16 @@ def render_table(devices: Sequence[Neighbor], context: NetworkContext, *, color:
     rows: list[list[str]] = []
     for device in devices:
         item = present(device)
-        status_code = {"Online": "1;32", "This device": "1;36", "Discovered": "33"}.get(item.status, "37")
+        if item.status.startswith(("Online", "Reachable")):
+            status_code = "1;32"
+        elif item.status == "This device":
+            status_code = "1;36"
+        elif item.status in {"Unreachable"}:
+            status_code = "1;31"
+        elif item.status in {"Discovered", "Seen recently"}:
+            status_code = "33"
+        else:
+            status_code = "37"
         row = [
                 f"{item.emoji}  {item.device_type}",
                 item.name,
@@ -69,7 +80,7 @@ def render_table(devices: Sequence[Neighbor], context: NetworkContext, *, color:
             row.append(", ".join(device.services) or "—")
         rows.append(row)
 
-    max_widths = (22, 30, 11, 15, 17, 28, 42)
+    max_widths = (22, 30, 18, 15, 17, 28, 42)
     widths = [
         min(max_widths[index], max([_display_width(value), *(_display_width(row[index]) for row in rows)]))
         for index, value in enumerate(header)
@@ -99,10 +110,35 @@ def render_json(devices: Sequence[Neighbor]) -> str:
                 "mac": device.mac,
                 "vendor": device.vendor,
                 "model": device.model,
+                "alias": device.alias,
+                "latency_ms": device.latency_ms,
+                "neighbor_state": device.neighbor_state,
                 "services": list(device.services),
                 "is_gateway": device.is_gateway,
                 "is_self": device.is_self,
             }
         )
     return json.dumps(rows, indent=2)
+
+
+def render_csv(devices: Sequence[Neighbor]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(("type", "name", "status", "ip", "mac", "vendor", "model", "latency_ms", "services"))
+    for device in {device.ip: device for device in devices}.values():
+        item = present(device)
+        writer.writerow(
+            (
+                item.device_type,
+                item.name,
+                item.status,
+                str(device.ip),
+                device.mac or "",
+                device.vendor or "",
+                device.model or "",
+                "" if device.latency_ms is None else f"{device.latency_ms:.3f}",
+                "; ".join(device.services),
+            )
+        )
+    return output.getvalue().rstrip("\n")
 

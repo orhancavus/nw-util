@@ -20,6 +20,9 @@ class Neighbor:
     vendor: str | None = None
     model: str | None = None
     services: tuple[str, ...] = ()
+    alias: str | None = None
+    latency_ms: float | None = None
+    neighbor_state: str | None = None
     responsive: bool = True
     is_self: bool = False
     is_gateway: bool = False

@@ -28,6 +28,14 @@ class ClassificationTests(unittest.TestCase):
         item = present(Neighbor(IPv4Address("192.168.1.22"), vendor="Shenzhen Skyworth Digital Technology"))
         self.assertEqual(item.device_type, "Television")
 
+    def test_mdns_service_classifies_airplay(self) -> None:
+        item = present(Neighbor(IPv4Address("192.168.1.43"), services=("airplay:7000",)))
+        self.assertEqual(item.device_type, "Television")
+
+    def test_hostname_with_suffix_classifies_ipad(self) -> None:
+        item = present(Neighbor(IPv4Address("192.168.1.42"), hostname="Orhan-iPadi.local"))
+        self.assertEqual(item.device_type, "Mobile")
+
 
 if __name__ == "__main__":
     unittest.main()

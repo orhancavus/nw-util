@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nw-util"
-version = "0.1.0"
+version = "0.2.0"
 description = "A colorful, privacy-friendly local network device scanner"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "nw-util contributors" }]
-dependencies = []
+dependencies = ["zeroconf>=0.131"]
 
 [project.scripts]
 nw-util = "nw_util.cli:main"

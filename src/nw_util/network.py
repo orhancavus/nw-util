@@ -132,7 +132,7 @@ def detect_network(network_override: str | None = None) -> NetworkContext:
     return context
 
 
-def _ping(ip: ipaddress.IPv4Address, timeout: float) -> bool:
+def _ping(ip: ipaddress.IPv4Address, timeout: float) -> float | None:
     milliseconds = max(100, int(timeout * 1000))
     system = platform.system()
     if system == "Windows":
@@ -142,16 +142,28 @@ def _ping(ip: ipaddress.IPv4Address, timeout: float) -> bool:
     else:
         args = ("ping", "-n", "-c", "1", "-W", str(max(1, math.ceil(timeout))), str(ip))
     try:
-        return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout + 1).returncode == 0
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout + 1,
+            check=False,
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r"time[=<]?\s*(\d+(?:\.\d+)?)\s*ms", result.stdout, re.IGNORECASE)
+    return float(match.group(1)) if match else 0.0
 
 
-def ping_sweep(network: ipaddress.IPv4Network, *, timeout: float = 0.5, workers: int = 64) -> set[ipaddress.IPv4Address]:
+def ping_sweep(
+    network: ipaddress.IPv4Network, *, timeout: float = 0.5, workers: int = 64
+) -> dict[ipaddress.IPv4Address, float]:
     hosts = list(network.hosts())
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, max(1, len(hosts)))) as pool:
         results = pool.map(lambda ip: (ip, _ping(ip, timeout)), hosts)
-        return {ip for ip, alive in results if alive}
+        return {ip: latency for ip, latency in results if latency is not None}
 
 
 def _normalize_mac(value: str) -> str | None:
@@ -161,14 +173,20 @@ def _normalize_mac(value: str) -> str | None:
     return value.upper()
 
 
-def read_neighbors() -> dict[ipaddress.IPv4Address, tuple[str, str | None]]:
-    neighbors: dict[ipaddress.IPv4Address, tuple[str, str | None]] = {}
+def read_neighbors() -> dict[ipaddress.IPv4Address, tuple[str, str | None, str | None]]:
+    neighbors: dict[ipaddress.IPv4Address, tuple[str, str | None, str | None]] = {}
     ip_output = _run("ip", "neigh", "show")
     for line in ip_output.splitlines():
         match = re.search(rf"^(\d+(?:\.\d+){{3}}).*?\blladdr\s+({MAC_PATTERN})\b", line)
         if match and (mac := _normalize_mac(match.group(2))):
             try:
-                neighbors[ipaddress.IPv4Address(match.group(1))] = (mac, None)
+                state_match = re.search(
+                    r"\b(PERMANENT|NOARP|STALE|REACHABLE|DELAY|PROBE|FAILED|INCOMPLETE)\b",
+                    line,
+                    re.IGNORECASE,
+                )
+                state = state_match.group(1).lower() if state_match else None
+                neighbors[ipaddress.IPv4Address(match.group(1))] = (mac, None, state)
             except ipaddress.AddressValueError:
                 pass
 
@@ -188,7 +206,11 @@ def read_neighbors() -> dict[ipaddress.IPv4Address, tuple[str, str | None]]:
             try:
                 ip = ipaddress.IPv4Address(raw_ip)
                 previous = neighbors.get(ip)
-                neighbors[ip] = (mac, hostname or (previous[1] if previous else None))
+                neighbors[ip] = (
+                    mac,
+                    hostname or (previous[1] if previous else None),
+                    previous[2] if previous else None,
+                )
             except ipaddress.AddressValueError:
                 pass
     return neighbors
@@ -259,9 +281,11 @@ def scan(
             f"{context.network} contains {host_count:,} hosts; use a narrower network or increase --max-hosts"
         )
 
-    alive = ping_sweep(context.network, timeout=timeout, workers=workers)
+    latencies = ping_sweep(context.network, timeout=timeout, workers=workers)
+    alive = set(latencies)
     if context.address in context.network:
         alive.add(context.address)
+        latencies.setdefault(context.address, 0.0)
     cached = read_neighbors()
     relevant_cached = {ip for ip in cached if ip in context.network}
     discovered = alive | relevant_cached
@@ -272,7 +296,7 @@ def scan(
     hostname = socket.gethostname().removesuffix(".")
     devices: list[Neighbor] = []
     for ip in sorted(discovered):
-        mac, cached_name = cached.get(ip, (None, None))
+        mac, cached_name, neighbor_state = cached.get(ip, (None, None, None))
         is_self = ip == context.address
         if is_self and not mac:
             mac = _interface_mac(context.interface)
@@ -282,6 +306,8 @@ def scan(
                 mac=mac,
                 hostname=hostname if is_self else cached_name,
                 vendor=_vendor_for(mac, vendors),
+                latency_ms=latencies.get(ip),
+                neighbor_state=neighbor_state,
                 responsive=ip in alive,
                 is_self=is_self,
                 is_gateway=ip == context.gateway,

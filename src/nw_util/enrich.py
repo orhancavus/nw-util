@@ -71,20 +71,25 @@ def parse_nmap_services(xml_output: str) -> dict[ipaddress.IPv4Address, tuple[st
     return found
 
 
-def _nmap_services(devices: Sequence[Neighbor], timeout: float) -> dict[ipaddress.IPv4Address, tuple[str, ...]]:
-    if not devices or shutil.which("nmap") is None:
+def scan_nmap_services(
+    targets: Sequence[Neighbor | ipaddress.IPv4Address],
+    timeout: float,
+    ports: Sequence[int] = COMMON_PORTS,
+) -> dict[ipaddress.IPv4Address, tuple[str, ...]]:
+    if not targets or shutil.which("nmap") is None:
         return {}
+    addresses = [target.ip if isinstance(target, Neighbor) else target for target in targets]
     args = [
         "nmap", "-sT", "-sV", "--version-light", "-T4", "-Pn",
-        "--host-timeout", "8s", "-p", ",".join(map(str, COMMON_PORTS)),
-        "-oX", "-", *[str(device.ip) for device in devices],
+        "--host-timeout", "8s", "-p", ",".join(map(str, ports)),
+        "-oX", "-", *[str(address) for address in addresses],
     ]
     try:
         result = subprocess.run(
             args,
             capture_output=True,
             text=True,
-            timeout=max(15.0, len(devices) * timeout * 8),
+            timeout=max(15.0, len(targets) * timeout * 8),
             check=False,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -97,7 +102,7 @@ def enrich_devices(
 ) -> list[Neighbor]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, max(1, len(devices)))) as pool:
         names = dict(zip((device.ip for device in devices), pool.map(lambda item: _resolve_name(item.ip), devices)))
-    services = _nmap_services(devices, timeout)
+    services = scan_nmap_services(devices, timeout)
     return [
         replace(
             device,
