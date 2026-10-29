@@ -24,7 +24,6 @@ nw-util = "nw_util.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nw_util"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/nw_util/web_dist" = "nw_util/web_dist"
+dev-mode-dirs = ["src"]
+artifacts = ["src/nw_util/web_dist/**"]
 
